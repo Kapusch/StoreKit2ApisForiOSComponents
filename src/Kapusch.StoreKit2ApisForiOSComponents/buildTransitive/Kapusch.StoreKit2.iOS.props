@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <UseKapuschStoreKit2InteropFromSource
+      Condition="'$(UseKapuschStoreKit2InteropFromSource)' == ''"
+      >false</UseKapuschStoreKit2InteropFromSource
+    >
+  </PropertyGroup>
+</Project>

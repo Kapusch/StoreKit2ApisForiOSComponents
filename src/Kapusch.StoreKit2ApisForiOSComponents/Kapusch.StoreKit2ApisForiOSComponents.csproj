@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-ios</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefaultItemExcludes>$(DefaultItemExcludes);Native/**</DefaultItemExcludes>
+    <PackageId>Kapusch.StoreKit2.iOS</PackageId>
+    <Authors>Kapusch</Authors>
+    <Description>StoreKit 2 iOS interop wrapper + classic xcframework packaging.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/Kapusch/StoreKit2ApisForiOSComponents</RepositoryUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IsPackable>true</IsPackable>
+    <IncludeSymbols>false</IncludeSymbols>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <AssemblyName>Kapusch.StoreKit2.iOS</AssemblyName>
+    <RootNamespace>Kapusch.StoreKit2.iOS</RootNamespace>
+    <Version>0.1.0</Version>
+    <PackageReadmeFile>nuget-readme.md</PackageReadmeFile>
+    <InteropIosWrapperDir
+      Condition="'$(InteropIosWrapperDir)' == '' and Exists('Native/iOS/build/kstorekit2.xcframework')"
+      >Native/iOS/build/kstorekit2.xcframework</InteropIosWrapperDir
+    >
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="buildTransitive/**" Pack="true" PackagePath="buildTransitive/" />
+    <None Include="nuget-readme.md" Pack="true" PackagePath="/" />
+    <None Include="../../THIRD_PARTY_NOTICES.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(InteropIosWrapperDir)' != '' and Exists('$(InteropIosWrapperDir)')">
+    <None Include="$(InteropIosWrapperDir)/**" Pack="true" PackagePath="kstorekit2.xcframework/" />
+  </ItemGroup>
+
+  <Target
+    Name="_KapuschStoreKit2Interop_CheckNativeAssets"
+    BeforeTargets="GenerateNuspec"
+    Condition="'$(IsPackable)' == 'true'"
+  >
+    <Error
+      Condition="'$(InteropIosWrapperDir)' == '' or !Exists('$(InteropIosWrapperDir)')"
+      Text="Missing iOS native wrapper. Build it first via src/Kapusch.StoreKit2ApisForiOSComponents/Native/iOS/build.sh or provide InteropIosWrapperDir."
+    />
+  </Target>
+</Project>

@@ -1,0 +1,13 @@
+# Build outputs
+bin/
+obj/
+artifacts/
+
+# Native build outputs
+src/**/Native/**/build/
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
+

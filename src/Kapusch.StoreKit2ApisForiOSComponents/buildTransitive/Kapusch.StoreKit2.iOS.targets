@@ -1,0 +1,45 @@
+<Project>
+  <PropertyGroup>
+    <_KapuschStoreKit2InteropPackageRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))</_KapuschStoreKit2InteropPackageRoot>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(UseKapuschStoreKit2InteropFromSource)' == 'true'">
+    <_KapuschStoreKit2InteropSourceRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../Native/iOS/build'))</_KapuschStoreKit2InteropSourceRoot>
+  </PropertyGroup>
+
+  <Target
+    Name="KapuschStoreKit2Interop_InjectIosNativeReferences_Source"
+    BeforeTargets="CoreCompile"
+    Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios' and '$(DisableKapuschStoreKit2InteropNativeAssets)' != 'true' and '$(UseKapuschStoreKit2InteropFromSource)' == 'true'"
+  >
+    <PropertyGroup>
+      <_KapuschStoreKit2InteropIosWrapper>$([System.IO.Path]::Combine('$(_KapuschStoreKit2InteropSourceRoot)', 'kstorekit2.xcframework'))</_KapuschStoreKit2InteropIosWrapper>
+    </PropertyGroup>
+    <Error
+      Condition="!Exists('$(_KapuschStoreKit2InteropIosWrapper)')"
+      Text="Kapusch.StoreKit2.iOS source-mode: missing wrapper xcframework at '$(_KapuschStoreKit2InteropIosWrapper)'. Build it first via src/Kapusch.StoreKit2ApisForiOSComponents/Native/iOS/build.sh."
+    />
+    <ItemGroup>
+      <NativeReference Include="$(_KapuschStoreKit2InteropIosWrapper)">
+        <Kind>Framework</Kind>
+        <ForceLoad>true</ForceLoad>
+      </NativeReference>
+    </ItemGroup>
+  </Target>
+
+  <Target
+    Name="KapuschStoreKit2Interop_InjectIosNativeReferences"
+    BeforeTargets="CoreCompile"
+    Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios' and '$(DisableKapuschStoreKit2InteropNativeAssets)' != 'true' and '$(UseKapuschStoreKit2InteropFromSource)' != 'true'"
+  >
+    <PropertyGroup>
+      <_KapuschStoreKit2InteropIosWrapper>$([System.IO.Path]::Combine('$(_KapuschStoreKit2InteropPackageRoot)', 'kstorekit2.xcframework'))</_KapuschStoreKit2InteropIosWrapper>
+    </PropertyGroup>
+    <ItemGroup>
+      <NativeReference Include="$(_KapuschStoreKit2InteropIosWrapper)">
+        <Kind>Framework</Kind>
+        <ForceLoad>true</ForceLoad>
+      </NativeReference>
+    </ItemGroup>
+  </Target>
+</Project>

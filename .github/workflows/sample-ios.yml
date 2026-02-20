@@ -1,0 +1,13 @@
+name: sample-ios
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    runs-on: macos-latest
+    steps:
+      - run: echo "No iOS sample project yet."
