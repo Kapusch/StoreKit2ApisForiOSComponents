@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  build_ios:
+  build_pack_ios:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,50 @@ jobs:
       - name: Install iOS workload
         run: dotnet workload install ios
 
+      - name: Build iOS wrapper
+        run: |
+          bash src/Kapusch.StoreKit2ApisForiOSComponents/Native/iOS/build.sh
+
       - name: Build package project
         run: |
           dotnet build src/Kapusch.StoreKit2ApisForiOSComponents/Kapusch.StoreKit2ApisForiOSComponents.csproj -c Release
+
+      - name: Pack
+        run: |
+          dotnet pack src/Kapusch.StoreKit2ApisForiOSComponents/Kapusch.StoreKit2ApisForiOSComponents.csproj -c Release -o artifacts/nuget
+
+      - name: Validate nupkg layout
+        run: |
+          python3 - <<'PY'
+          import glob, sys, zipfile
+
+          nupkgs = glob.glob("artifacts/nuget/*.nupkg")
+          if not nupkgs:
+            print("ERROR: no .nupkg found under artifacts/nuget/")
+            sys.exit(1)
+
+          nupkg = sorted(nupkgs)[-1]
+          print(f"Validating {nupkg}")
+
+          z = zipfile.ZipFile(nupkg)
+          names = set(z.namelist())
+
+          required = [
+            "buildTransitive/Kapusch.StoreKit2.iOS.targets",
+            "kstorekit2.xcframework/Info.plist",
+          ]
+
+          missing = [p for p in required if p not in names]
+          if missing:
+            print("ERROR: missing required paths in nupkg:")
+            for p in missing:
+              print(f"  - {p}")
+            sys.exit(1)
+
+          print("OK: nupkg layout looks correct.")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: artifacts/nuget/*.nupkg

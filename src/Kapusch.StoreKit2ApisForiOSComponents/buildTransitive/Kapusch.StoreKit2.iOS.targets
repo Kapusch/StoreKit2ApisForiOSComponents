@@ -21,7 +21,7 @@
     />
     <ItemGroup>
       <NativeReference Include="$(_KapuschStoreKit2InteropIosWrapper)">
-        <Kind>Framework</Kind>
+        <Kind>Static</Kind>
         <ForceLoad>true</ForceLoad>
       </NativeReference>
     </ItemGroup>
@@ -37,7 +37,7 @@
     </PropertyGroup>
     <ItemGroup>
       <NativeReference Include="$(_KapuschStoreKit2InteropIosWrapper)">
-        <Kind>Framework</Kind>
+        <Kind>Static</Kind>
         <ForceLoad>true</ForceLoad>
       </NativeReference>
     </ItemGroup>

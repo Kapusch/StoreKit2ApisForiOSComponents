@@ -25,10 +25,11 @@ Prerequisites:
 - macOS with Xcode installed
 - .NET SDK 10 (`global.json` pins `10.0.100`)
 
-Build managed layer:
-- `dotnet build src/Kapusch.StoreKit2ApisForiOSComponents/Kapusch.StoreKit2ApisForiOSComponents.csproj -c Release`
+Build native wrapper:
+- `bash src/Kapusch.StoreKit2ApisForiOSComponents/Native/iOS/build.sh`
 
-Native wrapper build script currently exists as scaffold and is completed in the next implementation wave.
+Pack NuGet:
+- `dotnet pack src/Kapusch.StoreKit2ApisForiOSComponents/Kapusch.StoreKit2ApisForiOSComponents.csproj -c Release -o artifacts/nuget`
 
 ## License
 
