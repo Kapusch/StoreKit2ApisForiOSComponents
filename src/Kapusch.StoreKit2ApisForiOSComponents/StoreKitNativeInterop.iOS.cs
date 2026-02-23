@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -6,280 +7,276 @@ namespace Kapusch.StoreKit2.iOS;
 
 internal sealed class RestorePayloadTransaction
 {
-  [JsonPropertyName("productId")]
-  public string? ProductId { get; init; }
+	[JsonPropertyName("productId")]
+	public string? ProductId { get; init; }
 
-  [JsonPropertyName("originalTransactionId")]
-  public string? OriginalTransactionId { get; init; }
+	[JsonPropertyName("originalTransactionId")]
+	public string? OriginalTransactionId { get; init; }
 
-  [JsonPropertyName("signedTransactionInfo")]
-  public string? SignedTransactionInfo { get; init; }
+	[JsonPropertyName("signedTransactionInfo")]
+	public string? SignedTransactionInfo { get; init; }
 }
 
-internal static partial class StoreKitNativeInterop
+internal static unsafe partial class StoreKitNativeInterop
 {
-  [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-  private delegate void PurchaseCallback(
-    int status,
-    IntPtr productId,
-    IntPtr originalTransactionId,
-    IntPtr signedTransactionInfo,
-    IntPtr errorCode,
-    IntPtr errorMessage,
-    IntPtr context
-  );
+	[LibraryImport(
+		"__Internal",
+		EntryPoint = "kstorekit2_purchase_start",
+		StringMarshalling = StringMarshalling.Utf8
+	)]
+	private static partial void PurchaseStart(
+		string productId,
+		string? appAccountToken,
+		delegate* unmanaged[Cdecl]<
+			int,
+			IntPtr,
+			IntPtr,
+			IntPtr,
+			IntPtr,
+			IntPtr,
+			IntPtr,
+			void> callback,
+		IntPtr context
+	);
 
-  [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-  private delegate void RestoreCallback(
-    int status,
-    IntPtr payloadJson,
-    IntPtr errorCode,
-    IntPtr errorMessage,
-    IntPtr context
-  );
+	[LibraryImport(
+		"__Internal",
+		EntryPoint = "kstorekit2_restore_start",
+		StringMarshalling = StringMarshalling.Utf8
+	)]
+	private static partial void RestoreStart(
+		string productIdsJson,
+		delegate* unmanaged[Cdecl]<int, IntPtr, IntPtr, IntPtr, IntPtr, void> callback,
+		IntPtr context
+	);
 
-  [DllImport("__Internal", EntryPoint = "kstorekit2_purchase_start")]
-  private static extern void PurchaseStart(
-    string productId,
-    string? appAccountToken,
-    PurchaseCallback callback,
-    IntPtr context
-  );
+	private sealed class PurchaseRequestContext(
+		TaskCompletionSource<StoreKitPurchaseResult> completion
+	)
+	{
+		public TaskCompletionSource<StoreKitPurchaseResult> Completion { get; } = completion;
+	}
 
-  [DllImport("__Internal", EntryPoint = "kstorekit2_restore_start")]
-  private static extern void RestoreStart(
-    string productIdsJson,
-    RestoreCallback callback,
-    IntPtr context
-  );
+	private sealed class RestoreRequestContext(
+		TaskCompletionSource<StoreKitRestoreResult> completion
+	)
+	{
+		public TaskCompletionSource<StoreKitRestoreResult> Completion { get; } = completion;
+	}
 
-  private sealed class PurchaseRequestContext
-  {
-    public PurchaseRequestContext(TaskCompletionSource<StoreKitPurchaseResult> completion)
-    {
-      Completion = completion;
-      Callback = OnPurchaseCompleted;
-    }
+	public static Task<StoreKitPurchaseResult> PurchaseAsync(
+		string productId,
+		string? appAccountToken,
+		CancellationToken cancellationToken
+	)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(productId);
+		cancellationToken.ThrowIfCancellationRequested();
 
-    public TaskCompletionSource<StoreKitPurchaseResult> Completion { get; }
+		var completion = new TaskCompletionSource<StoreKitPurchaseResult>(
+			TaskCreationOptions.RunContinuationsAsynchronously
+		);
+		var requestContext = new PurchaseRequestContext(completion);
+		var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
 
-    public PurchaseCallback Callback { get; }
-  }
+		try
+		{
+			PurchaseStart(
+				productId.Trim(),
+				appAccountToken,
+				&OnPurchaseCompleted,
+				GCHandle.ToIntPtr(gcHandle)
+			);
+		}
+		catch
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
 
-  private sealed class RestoreRequestContext
-  {
-    public RestoreRequestContext(TaskCompletionSource<StoreKitRestoreResult> completion)
-    {
-      Completion = completion;
-      Callback = OnRestoreCompleted;
-    }
+			throw;
+		}
 
-    public TaskCompletionSource<StoreKitRestoreResult> Completion { get; }
+		return completion.Task;
+	}
 
-    public RestoreCallback Callback { get; }
-  }
+	public static Task<StoreKitRestoreResult> RestoreAsync(
+		IReadOnlyList<string> productIds,
+		CancellationToken cancellationToken
+	)
+	{
+		ArgumentNullException.ThrowIfNull(productIds);
+		cancellationToken.ThrowIfCancellationRequested();
 
-  public static Task<StoreKitPurchaseResult> PurchaseAsync(
-    string productId,
-    string? appAccountToken,
-    CancellationToken cancellationToken
-  )
-  {
-    ArgumentException.ThrowIfNullOrWhiteSpace(productId);
-    cancellationToken.ThrowIfCancellationRequested();
+		var sanitized = productIds
+			.Where(static id => !string.IsNullOrWhiteSpace(id))
+			.Select(static id => id.Trim())
+			.Distinct(StringComparer.Ordinal)
+			.ToArray();
 
-    var completion = new TaskCompletionSource<StoreKitPurchaseResult>(
-      TaskCreationOptions.RunContinuationsAsynchronously
-    );
-    var requestContext = new PurchaseRequestContext(completion);
-    var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
+		var payloadJson = JsonSerializer.Serialize(
+			sanitized,
+			StoreKitJsonContext.Default.StringArray
+		);
 
-    try
-    {
-      PurchaseStart(productId.Trim(), appAccountToken, requestContext.Callback, GCHandle.ToIntPtr(gcHandle));
-    }
-    catch
-    {
-      if (gcHandle.IsAllocated)
-      {
-        gcHandle.Free();
-      }
+		var completion = new TaskCompletionSource<StoreKitRestoreResult>(
+			TaskCreationOptions.RunContinuationsAsynchronously
+		);
+		var requestContext = new RestoreRequestContext(completion);
+		var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
 
-      throw;
-    }
+		try
+		{
+			RestoreStart(payloadJson, &OnRestoreCompleted, GCHandle.ToIntPtr(gcHandle));
+		}
+		catch
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
 
-    return completion.Task;
-  }
+			throw;
+		}
 
-  public static Task<StoreKitRestoreResult> RestoreAsync(
-    IReadOnlyList<string> productIds,
-    CancellationToken cancellationToken
-  )
-  {
-    ArgumentNullException.ThrowIfNull(productIds);
-    cancellationToken.ThrowIfCancellationRequested();
+		return completion.Task;
+	}
 
-    var sanitized = productIds
-      .Where(static id => !string.IsNullOrWhiteSpace(id))
-      .Select(static id => id.Trim())
-      .Distinct(StringComparer.Ordinal)
-      .ToArray();
+	[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+	private static void OnPurchaseCompleted(
+		int status,
+		IntPtr productId,
+		IntPtr originalTransactionId,
+		IntPtr signedTransactionInfo,
+		IntPtr errorCode,
+		IntPtr errorMessage,
+		IntPtr context
+	)
+	{
+		var gcHandle = GCHandle.FromIntPtr(context);
+		if (gcHandle.Target is not PurchaseRequestContext requestContext)
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
 
-    var payloadJson = JsonSerializer.Serialize(sanitized, StoreKitJsonContext.Default.StringArray);
+			return;
+		}
 
-    var completion = new TaskCompletionSource<StoreKitRestoreResult>(
-      TaskCreationOptions.RunContinuationsAsynchronously
-    );
-    var requestContext = new RestoreRequestContext(completion);
-    var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
+		try
+		{
+			var result = new StoreKitPurchaseResult(
+				MapOutcome(status),
+				PtrToString(productId),
+				PtrToString(originalTransactionId),
+				PtrToString(signedTransactionInfo),
+				PtrToString(errorCode),
+				PtrToString(errorMessage)
+			);
 
-    try
-    {
-      RestoreStart(payloadJson, requestContext.Callback, GCHandle.ToIntPtr(gcHandle));
-    }
-    catch
-    {
-      if (gcHandle.IsAllocated)
-      {
-        gcHandle.Free();
-      }
+			requestContext.Completion.TrySetResult(result);
+		}
+		finally
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
+		}
+	}
 
-      throw;
-    }
+	[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+	private static void OnRestoreCompleted(
+		int status,
+		IntPtr payloadJson,
+		IntPtr errorCode,
+		IntPtr errorMessage,
+		IntPtr context
+	)
+	{
+		var gcHandle = GCHandle.FromIntPtr(context);
+		if (gcHandle.Target is not RestoreRequestContext requestContext)
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
 
-    return completion.Task;
-  }
+			return;
+		}
 
-  private static void OnPurchaseCompleted(
-    int status,
-    IntPtr productId,
-    IntPtr originalTransactionId,
-    IntPtr signedTransactionInfo,
-    IntPtr errorCode,
-    IntPtr errorMessage,
-    IntPtr context
-  )
-  {
-    var gcHandle = GCHandle.FromIntPtr(context);
-    if (gcHandle.Target is not PurchaseRequestContext requestContext)
-    {
-      if (gcHandle.IsAllocated)
-      {
-        gcHandle.Free();
-      }
+		try
+		{
+			var transactions = ParseRestoreTransactions(PtrToString(payloadJson));
+			var result = new StoreKitRestoreResult(
+				MapOutcome(status),
+				transactions,
+				PtrToString(errorCode),
+				PtrToString(errorMessage)
+			);
 
-      return;
-    }
+			requestContext.Completion.TrySetResult(result);
+		}
+		finally
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
+		}
+	}
 
-    try
-    {
-      var result = new StoreKitPurchaseResult(
-        MapOutcome(status),
-        PtrToString(productId),
-        PtrToString(originalTransactionId),
-        PtrToString(signedTransactionInfo),
-        PtrToString(errorCode),
-        PtrToString(errorMessage)
-      );
+	private static IReadOnlyList<StoreKitRestoreTransaction> ParseRestoreTransactions(
+		string? payloadJson
+	)
+	{
+		if (string.IsNullOrWhiteSpace(payloadJson))
+		{
+			return [];
+		}
 
-      requestContext.Completion.TrySetResult(result);
-    }
-    finally
-    {
-      if (gcHandle.IsAllocated)
-      {
-        gcHandle.Free();
-      }
-    }
-  }
+		try
+		{
+			var payload = JsonSerializer.Deserialize(
+				payloadJson,
+				StoreKitJsonContext.Default.ListRestorePayloadTransaction
+			);
 
-  private static void OnRestoreCompleted(
-    int status,
-    IntPtr payloadJson,
-    IntPtr errorCode,
-    IntPtr errorMessage,
-    IntPtr context
-  )
-  {
-    var gcHandle = GCHandle.FromIntPtr(context);
-    if (gcHandle.Target is not RestoreRequestContext requestContext)
-    {
-      if (gcHandle.IsAllocated)
-      {
-        gcHandle.Free();
-      }
+			if (payload is null || payload.Count == 0)
+			{
+				return [];
+			}
 
-      return;
-    }
+			return payload
+				.Where(static item =>
+					!string.IsNullOrWhiteSpace(item.ProductId)
+					&& !string.IsNullOrWhiteSpace(item.OriginalTransactionId)
+					&& !string.IsNullOrWhiteSpace(item.SignedTransactionInfo)
+				)
+				.Select(static item => new StoreKitRestoreTransaction(
+					item.ProductId!,
+					item.OriginalTransactionId!,
+					item.SignedTransactionInfo!
+				))
+				.ToArray();
+		}
+		catch
+		{
+			return [];
+		}
+	}
 
-    try
-    {
-      var transactions = ParseRestoreTransactions(PtrToString(payloadJson));
-      var result = new StoreKitRestoreResult(
-        MapOutcome(status),
-        transactions,
-        PtrToString(errorCode),
-        PtrToString(errorMessage)
-      );
+	private static StoreKitInteropOutcome MapOutcome(int status) =>
+		status switch
+		{
+			0 => StoreKitInteropOutcome.Success,
+			1 => StoreKitInteropOutcome.UserCancelled,
+			2 => StoreKitInteropOutcome.Pending,
+			_ => StoreKitInteropOutcome.Failed,
+		};
 
-      requestContext.Completion.TrySetResult(result);
-    }
-    finally
-    {
-      if (gcHandle.IsAllocated)
-      {
-        gcHandle.Free();
-      }
-    }
-  }
-
-  private static IReadOnlyList<StoreKitRestoreTransaction> ParseRestoreTransactions(string? payloadJson)
-  {
-    if (string.IsNullOrWhiteSpace(payloadJson))
-    {
-      return [];
-    }
-
-    try
-    {
-      var payload = JsonSerializer.Deserialize(
-        payloadJson,
-        StoreKitJsonContext.Default.ListRestorePayloadTransaction
-      );
-
-      if (payload is null || payload.Count == 0)
-      {
-        return [];
-      }
-
-      return payload
-        .Where(static item =>
-          !string.IsNullOrWhiteSpace(item.ProductId)
-          && !string.IsNullOrWhiteSpace(item.OriginalTransactionId)
-          && !string.IsNullOrWhiteSpace(item.SignedTransactionInfo)
-        )
-        .Select(static item => new StoreKitRestoreTransaction(
-          item.ProductId!,
-          item.OriginalTransactionId!,
-          item.SignedTransactionInfo!
-        ))
-        .ToArray();
-    }
-    catch
-    {
-      return [];
-    }
-  }
-
-  private static StoreKitInteropOutcome MapOutcome(int status) =>
-    status switch
-    {
-      0 => StoreKitInteropOutcome.Success,
-      1 => StoreKitInteropOutcome.UserCancelled,
-      2 => StoreKitInteropOutcome.Pending,
-      _ => StoreKitInteropOutcome.Failed,
-    };
-
-  private static string? PtrToString(IntPtr value) =>
-    value == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(value);
+	private static string? PtrToString(IntPtr value) =>
+		value == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(value);
 }
