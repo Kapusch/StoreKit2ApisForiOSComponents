@@ -50,6 +50,11 @@ internal static unsafe partial class StoreKitNativeInterop
 		IntPtr context
 	);
 
+	[LibraryImport("__Internal", EntryPoint = "kstorekit2_transaction_updates_start")]
+	private static partial void TransactionUpdatesStart();
+
+	private static int _transactionUpdatesStarted;
+
 	private sealed class PurchaseRequestContext(
 		TaskCompletionSource<StoreKitPurchaseResult> completion
 	)
@@ -141,6 +146,24 @@ internal static unsafe partial class StoreKitNativeInterop
 		}
 
 		return completion.Task;
+	}
+
+	public static void EnsureTransactionUpdatesListenerStarted()
+	{
+		if (Interlocked.CompareExchange(ref _transactionUpdatesStarted, 1, 0) != 0)
+		{
+			return;
+		}
+
+		try
+		{
+			TransactionUpdatesStart();
+		}
+		catch
+		{
+			Interlocked.Exchange(ref _transactionUpdatesStarted, 0);
+			throw;
+		}
 	}
 
 	[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]

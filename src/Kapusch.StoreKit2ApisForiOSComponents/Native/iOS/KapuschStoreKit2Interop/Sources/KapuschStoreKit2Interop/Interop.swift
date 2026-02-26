@@ -52,6 +52,9 @@ private final class RestoreCallbackContext: @unchecked Sendable {
   }
 }
 
+@MainActor
+private var transactionUpdatesTask: Task<Void, Never>?
+
 private func withCString(_ value: String?, _ body: (UnsafePointer<CChar>?) -> Void) {
   guard let value else {
     body(nil)
@@ -126,6 +129,27 @@ private func parseProductIdsJson(_ raw: UnsafePointer<CChar>?) -> Set<String> {
     .filter { !$0.isEmpty }
 
   return Set(sanitized)
+}
+
+@_cdecl("kstorekit2_transaction_updates_start")
+public func kstorekit2_transaction_updates_start() {
+  Task { @MainActor in
+    guard transactionUpdatesTask == nil else {
+      return
+    }
+
+    transactionUpdatesTask = Task.detached(priority: .background) {
+      for await verificationResult in Transaction.updates {
+        switch verificationResult {
+        case .verified(let transaction):
+          await transaction.finish()
+
+        case .unverified:
+          continue
+        }
+      }
+    }
+  }
 }
 
 @_cdecl("kstorekit2_purchase_start")

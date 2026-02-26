@@ -12,6 +12,8 @@ public interface IStoreKit2BillingClient
     IReadOnlyList<string> productIds,
     CancellationToken cancellationToken = default
   );
+
+  void EnsureTransactionUpdatesListenerStarted();
 }
 
 public sealed class StoreKit2BillingClient : IStoreKit2BillingClient
@@ -26,4 +28,7 @@ public sealed class StoreKit2BillingClient : IStoreKit2BillingClient
     IReadOnlyList<string> productIds,
     CancellationToken cancellationToken = default
   ) => StoreKitNativeInterop.RestoreAsync(productIds, cancellationToken);
+
+  public void EnsureTransactionUpdatesListenerStarted() =>
+    StoreKitNativeInterop.EnsureTransactionUpdatesListenerStarted();
 }
