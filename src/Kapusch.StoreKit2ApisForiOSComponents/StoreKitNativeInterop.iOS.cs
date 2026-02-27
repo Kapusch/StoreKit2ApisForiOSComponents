@@ -51,9 +51,12 @@ internal static unsafe partial class StoreKitNativeInterop
 	);
 
 	[LibraryImport("__Internal", EntryPoint = "kstorekit2_transaction_updates_start")]
-	private static partial void TransactionUpdatesStart();
+	private static partial void TransactionUpdatesStart(
+		delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, void> callback
+	);
 
 	private static int _transactionUpdatesStarted;
+	private static event Action<StoreKitTransactionUpdate>? TransactionUpdated;
 
 	private sealed class PurchaseRequestContext(
 		TaskCompletionSource<StoreKitPurchaseResult> completion
@@ -67,6 +70,16 @@ internal static unsafe partial class StoreKitNativeInterop
 	)
 	{
 		public TaskCompletionSource<StoreKitRestoreResult> Completion { get; } = completion;
+	}
+
+	private sealed class CallbackSubscription(Action dispose) : IDisposable
+	{
+		private Action? _dispose = dispose;
+
+		public void Dispose()
+		{
+			Interlocked.Exchange(ref _dispose, null)?.Invoke();
+		}
 	}
 
 	public static Task<StoreKitPurchaseResult> PurchaseAsync(
@@ -148,6 +161,13 @@ internal static unsafe partial class StoreKitNativeInterop
 		return completion.Task;
 	}
 
+	public static IDisposable SubscribeToTransactionUpdates(Action<StoreKitTransactionUpdate> handler)
+	{
+		ArgumentNullException.ThrowIfNull(handler);
+		TransactionUpdated += handler;
+		return new CallbackSubscription(() => TransactionUpdated -= handler);
+	}
+
 	public static void EnsureTransactionUpdatesListenerStarted()
 	{
 		if (Interlocked.CompareExchange(ref _transactionUpdatesStarted, 1, 0) != 0)
@@ -157,7 +177,7 @@ internal static unsafe partial class StoreKitNativeInterop
 
 		try
 		{
-			TransactionUpdatesStart();
+			TransactionUpdatesStart(&OnTransactionUpdated);
 		}
 		catch
 		{
@@ -247,6 +267,43 @@ internal static unsafe partial class StoreKitNativeInterop
 			if (gcHandle.IsAllocated)
 			{
 				gcHandle.Free();
+			}
+		}
+	}
+
+	[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+	private static void OnTransactionUpdated(
+		IntPtr productId,
+		IntPtr originalTransactionId,
+		IntPtr transactionId
+	)
+	{
+		var handlers = TransactionUpdated;
+		if (handlers is null)
+		{
+			return;
+		}
+
+		var update = new StoreKitTransactionUpdate(
+			PtrToString(productId),
+			PtrToString(originalTransactionId),
+			PtrToString(transactionId)
+		);
+
+		foreach (var invocation in handlers.GetInvocationList())
+		{
+			if (invocation is not Action<StoreKitTransactionUpdate> handler)
+			{
+				continue;
+			}
+
+			try
+			{
+				handler(update);
+			}
+			catch
+			{
+				// Keep the native callback resilient: one managed subscriber must not break the listener.
 			}
 		}
 	}

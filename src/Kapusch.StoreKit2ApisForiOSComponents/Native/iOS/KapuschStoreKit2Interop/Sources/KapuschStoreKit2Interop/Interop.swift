@@ -19,6 +19,12 @@ public typealias KapuschStoreKit2RestoreCallback = @convention(c) (
   UnsafeMutableRawPointer
 ) -> Void
 
+public typealias KapuschStoreKit2TransactionUpdateCallback = @convention(c) (
+  UnsafePointer<CChar>?,
+  UnsafePointer<CChar>?,
+  UnsafePointer<CChar>?
+) -> Void
+
 private enum NativeStatus: Int32 {
   case success = 0
   case cancelled = 1
@@ -54,6 +60,9 @@ private final class RestoreCallbackContext: @unchecked Sendable {
 
 @MainActor
 private var transactionUpdatesTask: Task<Void, Never>?
+
+@MainActor
+private var transactionUpdatesCallback: KapuschStoreKit2TransactionUpdateCallback?
 
 private func withCString(_ value: String?, _ body: (UnsafePointer<CChar>?) -> Void) {
   guard let value else {
@@ -118,6 +127,25 @@ private func callRestoreCallback(
   }
 }
 
+private func callTransactionUpdateCallback(
+  _ callback: KapuschStoreKit2TransactionUpdateCallback?,
+  productId: String?,
+  originalTransactionId: String?,
+  transactionId: String?
+) {
+  guard let callback else {
+    return
+  }
+
+  withCString(productId) { productIdC in
+    withCString(originalTransactionId) { originalTransactionIdC in
+      withCString(transactionId) { transactionIdC in
+        callback(productIdC, originalTransactionIdC, transactionIdC)
+      }
+    }
+  }
+}
+
 private func parseProductIdsJson(_ raw: UnsafePointer<CChar>?) -> Set<String> {
   guard let raw else { return [] }
   let json = String(cString: raw)
@@ -132,8 +160,12 @@ private func parseProductIdsJson(_ raw: UnsafePointer<CChar>?) -> Set<String> {
 }
 
 @_cdecl("kstorekit2_transaction_updates_start")
-public func kstorekit2_transaction_updates_start() {
+public func kstorekit2_transaction_updates_start(
+  _ callback: KapuschStoreKit2TransactionUpdateCallback?
+) {
   Task { @MainActor in
+    transactionUpdatesCallback = callback
+
     guard transactionUpdatesTask == nil else {
       return
     }
@@ -142,6 +174,15 @@ public func kstorekit2_transaction_updates_start() {
       for await verificationResult in Transaction.updates {
         switch verificationResult {
         case .verified(let transaction):
+          await MainActor.run {
+            callTransactionUpdateCallback(
+              transactionUpdatesCallback,
+              productId: transaction.productID,
+              originalTransactionId: String(transaction.originalID),
+              transactionId: String(transaction.id)
+            )
+          }
+
           await transaction.finish()
 
         case .unverified:
