@@ -9,6 +9,15 @@ public sealed record StoreKitTransactionUpdate(
   string? TransactionId
 );
 
+/// <summary>
+/// StoreKit-backed merchandising metadata for a subscription product.
+/// </summary>
+public sealed record StoreKitOfferMetadata(
+  string ProductId,
+  bool IsEligibleForIntroOffer,
+  int? IntroOfferDays
+);
+
 public interface IStoreKit2BillingClient
 {
   Task<StoreKitPurchaseResult> PurchaseAsync(
@@ -18,6 +27,11 @@ public interface IStoreKit2BillingClient
   );
 
   Task<StoreKitRestoreResult> RestoreAsync(
+    IReadOnlyList<string> productIds,
+    CancellationToken cancellationToken = default
+  );
+
+  Task<IReadOnlyList<StoreKitOfferMetadata>> GetOfferMetadataAsync(
     IReadOnlyList<string> productIds,
     CancellationToken cancellationToken = default
   );
@@ -45,6 +59,11 @@ public sealed class StoreKit2BillingClient : IStoreKit2BillingClient
     IReadOnlyList<string> productIds,
     CancellationToken cancellationToken = default
   ) => StoreKitNativeInterop.RestoreAsync(productIds, cancellationToken);
+
+  public Task<IReadOnlyList<StoreKitOfferMetadata>> GetOfferMetadataAsync(
+    IReadOnlyList<string> productIds,
+    CancellationToken cancellationToken = default
+  ) => StoreKitNativeInterop.GetOfferMetadataAsync(productIds, cancellationToken);
 
   public void EnsureTransactionUpdatesListenerStarted() =>
     StoreKitNativeInterop.EnsureTransactionUpdatesListenerStarted();

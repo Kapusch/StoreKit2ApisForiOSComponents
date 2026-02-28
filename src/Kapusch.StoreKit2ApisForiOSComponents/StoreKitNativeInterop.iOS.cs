@@ -17,6 +17,18 @@ internal sealed class RestorePayloadTransaction
 	public string? SignedTransactionInfo { get; init; }
 }
 
+internal sealed class StoreKitOfferMetadataPayload
+{
+	[JsonPropertyName("productId")]
+	public string? ProductId { get; init; }
+
+	[JsonPropertyName("isEligibleForIntroOffer")]
+	public bool IsEligibleForIntroOffer { get; init; }
+
+	[JsonPropertyName("introOfferDays")]
+	public int? IntroOfferDays { get; init; }
+}
+
 internal static unsafe partial class StoreKitNativeInterop
 {
 	[LibraryImport(
@@ -50,6 +62,17 @@ internal static unsafe partial class StoreKitNativeInterop
 		IntPtr context
 	);
 
+	[LibraryImport(
+		"__Internal",
+		EntryPoint = "kstorekit2_offer_metadata_start",
+		StringMarshalling = StringMarshalling.Utf8
+	)]
+	private static partial void OfferMetadataStart(
+		string productIdsJson,
+		delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, IntPtr, void> callback,
+		IntPtr context
+	);
+
 	[LibraryImport("__Internal", EntryPoint = "kstorekit2_transaction_updates_start")]
 	private static partial void TransactionUpdatesStart(
 		delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, void> callback
@@ -70,6 +93,13 @@ internal static unsafe partial class StoreKitNativeInterop
 	)
 	{
 		public TaskCompletionSource<StoreKitRestoreResult> Completion { get; } = completion;
+	}
+
+	private sealed class OfferMetadataRequestContext(
+		TaskCompletionSource<IReadOnlyList<StoreKitOfferMetadata>> completion
+	)
+	{
+		public TaskCompletionSource<IReadOnlyList<StoreKitOfferMetadata>> Completion { get; } = completion;
 	}
 
 	private sealed class CallbackSubscription(Action dispose) : IDisposable
@@ -147,6 +177,51 @@ internal static unsafe partial class StoreKitNativeInterop
 		try
 		{
 			RestoreStart(payloadJson, &OnRestoreCompleted, GCHandle.ToIntPtr(gcHandle));
+		}
+		catch
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
+
+			throw;
+		}
+
+		return completion.Task;
+	}
+
+	public static Task<IReadOnlyList<StoreKitOfferMetadata>> GetOfferMetadataAsync(
+		IReadOnlyList<string> productIds,
+		CancellationToken cancellationToken
+	)
+	{
+		ArgumentNullException.ThrowIfNull(productIds);
+		cancellationToken.ThrowIfCancellationRequested();
+
+		var sanitized = productIds
+			.Where(static id => !string.IsNullOrWhiteSpace(id))
+			.Select(static id => id.Trim())
+			.Distinct(StringComparer.Ordinal)
+			.ToArray();
+		if (sanitized.Length == 0)
+		{
+			return Task.FromResult<IReadOnlyList<StoreKitOfferMetadata>>([]);
+		}
+
+		var payloadJson = JsonSerializer.Serialize(
+			sanitized,
+			StoreKitJsonContext.Default.StringArray
+		);
+		var completion = new TaskCompletionSource<IReadOnlyList<StoreKitOfferMetadata>>(
+			TaskCreationOptions.RunContinuationsAsynchronously
+		);
+		var requestContext = new OfferMetadataRequestContext(completion);
+		var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
+
+		try
+		{
+			OfferMetadataStart(payloadJson, &OnOfferMetadataCompleted, GCHandle.ToIntPtr(gcHandle));
 		}
 		catch
 		{
@@ -272,6 +347,50 @@ internal static unsafe partial class StoreKitNativeInterop
 	}
 
 	[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+	private static void OnOfferMetadataCompleted(
+		IntPtr payloadJson,
+		IntPtr errorCode,
+		IntPtr errorMessage,
+		IntPtr context
+	)
+	{
+		var gcHandle = GCHandle.FromIntPtr(context);
+		if (gcHandle.Target is not OfferMetadataRequestContext requestContext)
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
+
+			return;
+		}
+
+		try
+		{
+			var errorCodeValue = PtrToString(errorCode);
+			var errorMessageValue = PtrToString(errorMessage);
+			if (!string.IsNullOrWhiteSpace(errorCodeValue) || !string.IsNullOrWhiteSpace(errorMessageValue))
+			{
+				requestContext.Completion.TrySetException(
+					new InvalidOperationException(
+						errorMessageValue ?? errorCodeValue ?? "StoreKit offer metadata query failed."
+					)
+				);
+				return;
+			}
+
+			requestContext.Completion.TrySetResult(ParseOfferMetadata(PtrToString(payloadJson)));
+		}
+		finally
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
+		}
+	}
+
+	[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
 	private static void OnTransactionUpdated(
 		IntPtr productId,
 		IntPtr originalTransactionId,
@@ -339,6 +458,39 @@ internal static unsafe partial class StoreKitNativeInterop
 					item.ProductId!,
 					item.OriginalTransactionId!,
 					item.SignedTransactionInfo!
+				))
+				.ToArray();
+		}
+		catch
+		{
+			return [];
+		}
+	}
+
+	private static IReadOnlyList<StoreKitOfferMetadata> ParseOfferMetadata(string? payloadJson)
+	{
+		if (string.IsNullOrWhiteSpace(payloadJson))
+		{
+			return [];
+		}
+
+		try
+		{
+			var payload = JsonSerializer.Deserialize(
+				payloadJson,
+				StoreKitJsonContext.Default.ListStoreKitOfferMetadataPayload
+			);
+			if (payload is null || payload.Count == 0)
+			{
+				return [];
+			}
+
+			return payload
+				.Where(static item => !string.IsNullOrWhiteSpace(item.ProductId))
+				.Select(static item => new StoreKitOfferMetadata(
+					item.ProductId!,
+					item.IsEligibleForIntroOffer,
+					item.IntroOfferDays
 				))
 				.ToArray();
 		}

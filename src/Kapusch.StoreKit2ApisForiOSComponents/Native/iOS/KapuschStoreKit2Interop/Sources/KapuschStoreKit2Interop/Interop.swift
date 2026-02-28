@@ -19,6 +19,13 @@ public typealias KapuschStoreKit2RestoreCallback = @convention(c) (
   UnsafeMutableRawPointer
 ) -> Void
 
+public typealias KapuschStoreKit2OfferMetadataCallback = @convention(c) (
+  UnsafePointer<CChar>?,
+  UnsafePointer<CChar>?,
+  UnsafePointer<CChar>?,
+  UnsafeMutableRawPointer
+) -> Void
+
 public typealias KapuschStoreKit2TransactionUpdateCallback = @convention(c) (
   UnsafePointer<CChar>?,
   UnsafePointer<CChar>?,
@@ -38,6 +45,12 @@ private struct RestoreTransactionPayload: Codable {
   let signedTransactionInfo: String
 }
 
+private struct OfferMetadataPayload: Codable {
+  let productId: String
+  let isEligibleForIntroOffer: Bool
+  let introOfferDays: Int?
+}
+
 private final class PurchaseCallbackContext: @unchecked Sendable {
   let callback: KapuschStoreKit2PurchaseCallback
   let context: UnsafeMutableRawPointer
@@ -53,6 +66,16 @@ private final class RestoreCallbackContext: @unchecked Sendable {
   let context: UnsafeMutableRawPointer
 
   init(callback: @escaping KapuschStoreKit2RestoreCallback, context: UnsafeMutableRawPointer) {
+    self.callback = callback
+    self.context = context
+  }
+}
+
+private final class OfferMetadataCallbackContext: @unchecked Sendable {
+  let callback: KapuschStoreKit2OfferMetadataCallback
+  let context: UnsafeMutableRawPointer
+
+  init(callback: @escaping KapuschStoreKit2OfferMetadataCallback, context: UnsafeMutableRawPointer) {
     self.callback = callback
     self.context = context
   }
@@ -127,6 +150,26 @@ private func callRestoreCallback(
   }
 }
 
+private func callOfferMetadataCallback(
+  _ callbackContext: OfferMetadataCallbackContext,
+  payloadJson: String? = nil,
+  errorCode: String? = nil,
+  errorMessage: String? = nil
+) {
+  withCString(payloadJson) { payloadJsonC in
+    withCString(errorCode) { errorCodeC in
+      withCString(errorMessage) { errorMessageC in
+        callbackContext.callback(
+          payloadJsonC,
+          errorCodeC,
+          errorMessageC,
+          callbackContext.context
+        )
+      }
+    }
+  }
+}
+
 private func callTransactionUpdateCallback(
   _ callback: KapuschStoreKit2TransactionUpdateCallback?,
   productId: String?,
@@ -157,6 +200,28 @@ private func parseProductIdsJson(_ raw: UnsafePointer<CChar>?) -> Set<String> {
     .filter { !$0.isEmpty }
 
   return Set(sanitized)
+}
+
+private func totalDays(for offer: Product.SubscriptionOffer?) -> Int? {
+  guard let offer else {
+    return nil
+  }
+
+  let unitValue: Int
+  switch offer.period.unit {
+  case .day:
+    unitValue = offer.period.value
+  case .week:
+    unitValue = offer.period.value * 7
+  case .month:
+    unitValue = offer.period.value * 30
+  case .year:
+    unitValue = offer.period.value * 365
+  @unknown default:
+    return nil
+  }
+
+  return unitValue * max(offer.periodCount, 1)
 }
 
 @_cdecl("kstorekit2_transaction_updates_start")
@@ -371,6 +436,64 @@ public func kstorekit2_restore_start(
       callRestoreCallback(
         callbackContext,
         status: .failed,
+        errorCode: "\(nsError.domain):\(nsError.code)",
+        errorMessage: nsError.localizedDescription
+      )
+    }
+  }
+}
+
+@_cdecl("kstorekit2_offer_metadata_start")
+public func kstorekit2_offer_metadata_start(
+  _ productIdsJsonPtr: UnsafePointer<CChar>?,
+  _ callback: @escaping KapuschStoreKit2OfferMetadataCallback,
+  _ context: UnsafeMutableRawPointer
+) {
+  let callbackContext = OfferMetadataCallbackContext(callback: callback, context: context)
+  let filterProductIds = parseProductIdsJson(productIdsJsonPtr)
+
+  guard !filterProductIds.isEmpty else {
+    callOfferMetadataCallback(
+      callbackContext,
+      errorCode: "missing_product_ids",
+      errorMessage: "At least one product id is required."
+    )
+    return
+  }
+
+  Task { @MainActor in
+    do {
+      let products = try await Product.products(for: Array(filterProductIds))
+      var payload: [OfferMetadataPayload] = []
+      payload.reserveCapacity(products.count)
+
+      for product in products {
+        guard let subscription = product.subscription else {
+          continue
+        }
+
+        let introOffer = subscription.introductoryOffer
+        let introOfferDays = totalDays(for: introOffer)
+        let isEligibleForIntroOffer = introOffer != nil
+          ? await subscription.isEligibleForIntroOffer
+          : false
+
+        payload.append(
+          OfferMetadataPayload(
+            productId: product.id,
+            isEligibleForIntroOffer: isEligibleForIntroOffer,
+            introOfferDays: introOfferDays
+          )
+        )
+      }
+
+      let payloadData = try JSONEncoder().encode(payload)
+      let payloadJson = String(data: payloadData, encoding: .utf8)
+      callOfferMetadataCallback(callbackContext, payloadJson: payloadJson)
+    } catch {
+      let nsError = error as NSError
+      callOfferMetadataCallback(
+        callbackContext,
         errorCode: "\(nsError.domain):\(nsError.code)",
         errorMessage: nsError.localizedDescription
       )
