@@ -15,7 +15,9 @@ public sealed record StoreKitTransactionUpdate(
 public sealed record StoreKitOfferMetadata(
   string ProductId,
   bool IsEligibleForIntroOffer,
-  int? IntroOfferDays
+  int? IntroOfferDays,
+  decimal? CurrentPrice,
+  string? CurrentPriceDisplayText
 );
 
 public interface IStoreKit2BillingClient

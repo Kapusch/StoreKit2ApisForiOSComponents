@@ -49,6 +49,8 @@ private struct OfferMetadataPayload: Codable {
   let productId: String
   let isEligibleForIntroOffer: Bool
   let introOfferDays: Int?
+  let currentPrice: Decimal
+  let currentPriceDisplayText: String
 }
 
 private final class PurchaseCallbackContext: @unchecked Sendable {
@@ -482,7 +484,9 @@ public func kstorekit2_offer_metadata_start(
           OfferMetadataPayload(
             productId: product.id,
             isEligibleForIntroOffer: isEligibleForIntroOffer,
-            introOfferDays: introOfferDays
+            introOfferDays: introOfferDays,
+            currentPrice: product.price,
+            currentPriceDisplayText: product.displayPrice
           )
         )
       }

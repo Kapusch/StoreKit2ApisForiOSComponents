@@ -27,6 +27,12 @@ internal sealed class StoreKitOfferMetadataPayload
 
 	[JsonPropertyName("introOfferDays")]
 	public int? IntroOfferDays { get; init; }
+
+	[JsonPropertyName("currentPrice")]
+	public decimal? CurrentPrice { get; init; }
+
+	[JsonPropertyName("currentPriceDisplayText")]
+	public string? CurrentPriceDisplayText { get; init; }
 }
 
 internal static unsafe partial class StoreKitNativeInterop
@@ -490,7 +496,9 @@ internal static unsafe partial class StoreKitNativeInterop
 				.Select(static item => new StoreKitOfferMetadata(
 					item.ProductId!,
 					item.IsEligibleForIntroOffer,
-					item.IntroOfferDays
+					item.IntroOfferDays,
+					item.CurrentPrice,
+					item.CurrentPriceDisplayText
 				))
 				.ToArray();
 		}
