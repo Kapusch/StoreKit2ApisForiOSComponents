@@ -59,10 +59,46 @@ internal static unsafe partial class StoreKitNativeInterop
 
 	[LibraryImport(
 		"__Internal",
+		EntryPoint = "kstorekit2_purchase_promotional_start",
+		StringMarshalling = StringMarshalling.Utf8
+	)]
+	private static partial void PurchasePromotionalStart(
+		string productId,
+		string? appAccountToken,
+		string offerId,
+		string keyId,
+		string nonce,
+		string signature,
+		long timestamp,
+		delegate* unmanaged[Cdecl]<
+			int,
+			IntPtr,
+			IntPtr,
+			IntPtr,
+			IntPtr,
+			IntPtr,
+			IntPtr,
+			void> callback,
+		IntPtr context
+	);
+
+	[LibraryImport(
+		"__Internal",
 		EntryPoint = "kstorekit2_restore_start",
 		StringMarshalling = StringMarshalling.Utf8
 	)]
 	private static partial void RestoreStart(
+		string productIdsJson,
+		delegate* unmanaged[Cdecl]<int, IntPtr, IntPtr, IntPtr, IntPtr, void> callback,
+		IntPtr context
+	);
+
+	[LibraryImport(
+		"__Internal",
+		EntryPoint = "kstorekit2_current_entitlements_start",
+		StringMarshalling = StringMarshalling.Utf8
+	)]
+	private static partial void CurrentEntitlementsStart(
 		string productIdsJson,
 		delegate* unmanaged[Cdecl]<int, IntPtr, IntPtr, IntPtr, IntPtr, void> callback,
 		IntPtr context
@@ -124,35 +160,68 @@ internal static unsafe partial class StoreKitNativeInterop
 		CancellationToken cancellationToken
 	)
 	{
-		ArgumentException.ThrowIfNullOrWhiteSpace(productId);
 		cancellationToken.ThrowIfCancellationRequested();
-
-		var completion = new TaskCompletionSource<StoreKitPurchaseResult>(
-			TaskCreationOptions.RunContinuationsAsynchronously
+		var normalizedProductId = ValidateRequiredValue(productId, nameof(productId));
+		return StartPurchaseRequest(
+			context =>
+				PurchaseStart(
+					normalizedProductId,
+					appAccountToken,
+					&OnPurchaseCompleted,
+					context
+				)
 		);
-		var requestContext = new PurchaseRequestContext(completion);
-		var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
+	}
 
-		try
+	public static Task<StoreKitPurchaseResult> PurchaseWithPromotionalOfferAsync(
+		string productId,
+		StoreKitPromotionalOfferSignature promotionalOffer,
+		string? appAccountToken,
+		CancellationToken cancellationToken
+	)
+	{
+		cancellationToken.ThrowIfCancellationRequested();
+		ArgumentNullException.ThrowIfNull(promotionalOffer);
+
+		var normalizedProductId = ValidateRequiredValue(productId, nameof(productId));
+		var normalizedOfferId = ValidateRequiredValue(
+			promotionalOffer.OfferId,
+			$"{nameof(promotionalOffer)}.{nameof(promotionalOffer.OfferId)}"
+		);
+		var normalizedKeyId = ValidateRequiredValue(
+			promotionalOffer.KeyId,
+			$"{nameof(promotionalOffer)}.{nameof(promotionalOffer.KeyId)}"
+		);
+		var normalizedNonce = ValidateRequiredValue(
+			promotionalOffer.Nonce,
+			$"{nameof(promotionalOffer)}.{nameof(promotionalOffer.Nonce)}"
+		);
+		var normalizedSignature = ValidateRequiredValue(
+			promotionalOffer.Signature,
+			$"{nameof(promotionalOffer)}.{nameof(promotionalOffer.Signature)}"
+		);
+		if (promotionalOffer.Timestamp <= 0)
 		{
-			PurchaseStart(
-				productId.Trim(),
-				appAccountToken,
-				&OnPurchaseCompleted,
-				GCHandle.ToIntPtr(gcHandle)
+			throw new ArgumentOutOfRangeException(
+				nameof(promotionalOffer),
+				"Promotional offer timestamp must be a positive Unix-millisecond value."
 			);
 		}
-		catch
-		{
-			if (gcHandle.IsAllocated)
-			{
-				gcHandle.Free();
-			}
 
-			throw;
-		}
-
-		return completion.Task;
+		return StartPurchaseRequest(
+			context =>
+				PurchasePromotionalStart(
+					normalizedProductId,
+					appAccountToken,
+					normalizedOfferId,
+					normalizedKeyId,
+					normalizedNonce,
+					normalizedSignature,
+					promotionalOffer.Timestamp,
+					&OnPurchaseCompleted,
+					context
+				)
+		);
 	}
 
 	public static Task<StoreKitRestoreResult> RestoreAsync(
@@ -160,41 +229,22 @@ internal static unsafe partial class StoreKitNativeInterop
 		CancellationToken cancellationToken
 	)
 	{
-		ArgumentNullException.ThrowIfNull(productIds);
 		cancellationToken.ThrowIfCancellationRequested();
+		var payloadJson = SerializeProductIds(productIds);
+		return StartRestoreRequest(context => RestoreStart(payloadJson, &OnRestoreCompleted, context));
+	}
 
-		var sanitized = productIds
-			.Where(static id => !string.IsNullOrWhiteSpace(id))
-			.Select(static id => id.Trim())
-			.Distinct(StringComparer.Ordinal)
-			.ToArray();
-
-		var payloadJson = JsonSerializer.Serialize(
-			sanitized,
-			StoreKitJsonContext.Default.StringArray
+	public static Task<StoreKitRestoreResult> GetCurrentEntitlementsAsync(
+		IReadOnlyList<string> productIds,
+		CancellationToken cancellationToken
+	)
+	{
+		cancellationToken.ThrowIfCancellationRequested();
+		var payloadJson = SerializeProductIds(productIds);
+		return StartRestoreRequest(
+			context =>
+				CurrentEntitlementsStart(payloadJson, &OnRestoreCompleted, context)
 		);
-
-		var completion = new TaskCompletionSource<StoreKitRestoreResult>(
-			TaskCreationOptions.RunContinuationsAsynchronously
-		);
-		var requestContext = new RestoreRequestContext(completion);
-		var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
-
-		try
-		{
-			RestoreStart(payloadJson, &OnRestoreCompleted, GCHandle.ToIntPtr(gcHandle));
-		}
-		catch
-		{
-			if (gcHandle.IsAllocated)
-			{
-				gcHandle.Free();
-			}
-
-			throw;
-		}
-
-		return completion.Task;
 	}
 
 	public static Task<IReadOnlyList<StoreKitOfferMetadata>> GetOfferMetadataAsync(
@@ -265,6 +315,80 @@ internal static unsafe partial class StoreKitNativeInterop
 			Interlocked.Exchange(ref _transactionUpdatesStarted, 0);
 			throw;
 		}
+	}
+
+	private static Task<StoreKitPurchaseResult> StartPurchaseRequest(
+		Action<IntPtr> startNativeCall
+	)
+	{
+		var completion = new TaskCompletionSource<StoreKitPurchaseResult>(
+			TaskCreationOptions.RunContinuationsAsynchronously
+		);
+		var requestContext = new PurchaseRequestContext(completion);
+		var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
+
+		try
+		{
+			startNativeCall(GCHandle.ToIntPtr(gcHandle));
+		}
+		catch
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
+
+			throw;
+		}
+
+		return completion.Task;
+	}
+
+	private static Task<StoreKitRestoreResult> StartRestoreRequest(Action<IntPtr> startNativeCall)
+	{
+		var completion = new TaskCompletionSource<StoreKitRestoreResult>(
+			TaskCreationOptions.RunContinuationsAsynchronously
+		);
+		var requestContext = new RestoreRequestContext(completion);
+		var gcHandle = GCHandle.Alloc(requestContext, GCHandleType.Normal);
+
+		try
+		{
+			startNativeCall(GCHandle.ToIntPtr(gcHandle));
+		}
+		catch
+		{
+			if (gcHandle.IsAllocated)
+			{
+				gcHandle.Free();
+			}
+
+			throw;
+		}
+
+		return completion.Task;
+	}
+
+	private static string SerializeProductIds(IReadOnlyList<string> productIds)
+	{
+		ArgumentNullException.ThrowIfNull(productIds);
+
+		var sanitized = productIds
+			.Where(static id => !string.IsNullOrWhiteSpace(id))
+			.Select(static id => id.Trim())
+			.Distinct(StringComparer.Ordinal)
+			.ToArray();
+
+		return JsonSerializer.Serialize(
+			sanitized,
+			StoreKitJsonContext.Default.StringArray
+		);
+	}
+
+	private static string ValidateRequiredValue(string? value, string paramName)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(value, paramName);
+		return value.Trim();
 	}
 
 	[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]

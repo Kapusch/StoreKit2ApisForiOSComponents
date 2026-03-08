@@ -20,6 +20,17 @@ public sealed record StoreKitOfferMetadata(
   string? CurrentPriceDisplayText
 );
 
+/// <summary>
+/// Server-signed promotional offer payload used by StoreKit purchase options.
+/// </summary>
+public sealed record StoreKitPromotionalOfferSignature(
+  string OfferId,
+  string KeyId,
+  string Nonce,
+  string Signature,
+  long Timestamp
+);
+
 public interface IStoreKit2BillingClient
 {
   Task<StoreKitPurchaseResult> PurchaseAsync(
@@ -28,7 +39,19 @@ public interface IStoreKit2BillingClient
     CancellationToken cancellationToken = default
   );
 
+  Task<StoreKitPurchaseResult> PurchaseWithPromotionalOfferAsync(
+    string productId,
+    StoreKitPromotionalOfferSignature promotionalOffer,
+    string? appAccountToken = null,
+    CancellationToken cancellationToken = default
+  );
+
   Task<StoreKitRestoreResult> RestoreAsync(
+    IReadOnlyList<string> productIds,
+    CancellationToken cancellationToken = default
+  );
+
+  Task<StoreKitRestoreResult> GetCurrentEntitlementsAsync(
     IReadOnlyList<string> productIds,
     CancellationToken cancellationToken = default
   );
@@ -57,10 +80,28 @@ public sealed class StoreKit2BillingClient : IStoreKit2BillingClient
     CancellationToken cancellationToken = default
   ) => StoreKitNativeInterop.PurchaseAsync(productId, appAccountToken, cancellationToken);
 
+  public Task<StoreKitPurchaseResult> PurchaseWithPromotionalOfferAsync(
+    string productId,
+    StoreKitPromotionalOfferSignature promotionalOffer,
+    string? appAccountToken = null,
+    CancellationToken cancellationToken = default
+  ) =>
+    StoreKitNativeInterop.PurchaseWithPromotionalOfferAsync(
+      productId,
+      promotionalOffer,
+      appAccountToken,
+      cancellationToken
+    );
+
   public Task<StoreKitRestoreResult> RestoreAsync(
     IReadOnlyList<string> productIds,
     CancellationToken cancellationToken = default
   ) => StoreKitNativeInterop.RestoreAsync(productIds, cancellationToken);
+
+  public Task<StoreKitRestoreResult> GetCurrentEntitlementsAsync(
+    IReadOnlyList<string> productIds,
+    CancellationToken cancellationToken = default
+  ) => StoreKitNativeInterop.GetCurrentEntitlementsAsync(productIds, cancellationToken);
 
   public Task<IReadOnlyList<StoreKitOfferMetadata>> GetOfferMetadataAsync(
     IReadOnlyList<string> productIds,

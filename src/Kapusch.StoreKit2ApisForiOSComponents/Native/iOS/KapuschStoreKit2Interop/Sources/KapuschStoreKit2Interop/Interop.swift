@@ -226,6 +226,155 @@ private func totalDays(for offer: Product.SubscriptionOffer?) -> Int? {
   return unitValue * max(offer.periodCount, 1)
 }
 
+private struct PromotionalOfferInput {
+  let offerId: String
+  let keyId: String
+  let nonce: UUID
+  let signature: Data
+  let timestamp: Int
+}
+
+private func sanitizeRequiredCstring(
+  _ pointer: UnsafePointer<CChar>?
+) -> String? {
+  guard let pointer else {
+    return nil
+  }
+
+  let value = String(cString: pointer).trimmingCharacters(in: .whitespacesAndNewlines)
+  return value.isEmpty ? nil : value
+}
+
+private func collectCurrentEntitlements(
+  filterProductIds: Set<String>
+) async -> [RestoreTransactionPayload] {
+  var transactions: [RestoreTransactionPayload] = []
+
+  for await verificationResult in Transaction.currentEntitlements {
+    switch verificationResult {
+    case .verified(let transaction):
+      if !filterProductIds.isEmpty && !filterProductIds.contains(transaction.productID) {
+        continue
+      }
+
+      transactions.append(
+        RestoreTransactionPayload(
+          productId: transaction.productID,
+          originalTransactionId: String(transaction.originalID),
+          signedTransactionInfo: verificationResult.jwsRepresentation
+        )
+      )
+
+    case .unverified:
+      continue
+    }
+  }
+
+  return transactions
+}
+
+@MainActor
+private func executePurchase(
+  callbackContext: PurchaseCallbackContext,
+  productId: String,
+  appAccountToken: UUID?,
+  promotionalOffer: PromotionalOfferInput? = nil
+) async {
+  if !AppStore.canMakePayments {
+    callPurchaseCallback(
+      callbackContext,
+      status: .failed,
+      errorCode: "payments_disabled",
+      errorMessage: "In-app purchases are disabled on this device."
+    )
+    return
+  }
+
+  do {
+    let products = try await Product.products(for: [productId])
+    guard let product = products.first else {
+      callPurchaseCallback(
+        callbackContext,
+        status: .failed,
+        errorCode: "product_not_found",
+        errorMessage: "The requested product was not found."
+      )
+      return
+    }
+
+    var options = Set<Product.PurchaseOption>()
+    if let appAccountToken {
+      options.insert(.appAccountToken(appAccountToken))
+    }
+    if let promotionalOffer {
+      options.insert(
+        .promotionalOffer(
+          offerID: promotionalOffer.offerId,
+          keyID: promotionalOffer.keyId,
+          nonce: promotionalOffer.nonce,
+          signature: promotionalOffer.signature,
+          timestamp: promotionalOffer.timestamp
+        )
+      )
+    }
+
+    let result = try await product.purchase(options: options)
+
+    switch result {
+    case .userCancelled:
+      callPurchaseCallback(callbackContext, status: .cancelled)
+
+    case .pending:
+      callPurchaseCallback(callbackContext, status: .pending)
+
+    case .success(let verificationResult):
+      switch verificationResult {
+      case .verified(let transaction):
+        let transactionJws = verificationResult.jwsRepresentation
+        let originalId = String(transaction.originalID)
+
+        await transaction.finish()
+
+        callPurchaseCallback(
+          callbackContext,
+          status: .success,
+          productId: transaction.productID,
+          originalTransactionId: originalId,
+          signedTransactionInfo: transactionJws
+        )
+
+      case .unverified(let transaction, let error):
+        let transactionJws = verificationResult.jwsRepresentation
+        callPurchaseCallback(
+          callbackContext,
+          status: .failed,
+          productId: transaction.productID,
+          originalTransactionId: String(transaction.originalID),
+          signedTransactionInfo: transactionJws,
+          errorCode: "unverified_transaction",
+          errorMessage: error.localizedDescription
+        )
+      }
+
+    @unknown default:
+      callPurchaseCallback(
+        callbackContext,
+        status: .failed,
+        errorCode: "unknown_purchase_result",
+        errorMessage: "Unknown purchase result."
+      )
+    }
+  } catch {
+    let nsError = error as NSError
+    callPurchaseCallback(
+      callbackContext,
+      status: .failed,
+      errorCode: "\(nsError.domain):\(nsError.code)",
+      errorMessage: nsError.localizedDescription
+    )
+  }
+}
+
 @_cdecl("kstorekit2_transaction_updates_start")
 public func kstorekit2_transaction_updates_start(
   _ callback: KapuschStoreKit2TransactionUpdateCallback?
@@ -268,19 +417,7 @@ public func kstorekit2_purchase_start(
   _ context: UnsafeMutableRawPointer
 ) {
   let callbackContext = PurchaseCallbackContext(callback: callback, context: context)
-
-  guard let productIdPtr else {
-    callPurchaseCallback(
-      callbackContext,
-      status: .failed,
-      errorCode: "missing_product_id",
-      errorMessage: "A product id is required."
-    )
-    return
-  }
-
-  let productId = String(cString: productIdPtr)
-  if productId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+  guard let productId = sanitizeRequiredCstring(productIdPtr) else {
     callPurchaseCallback(
       callbackContext,
       status: .failed,
@@ -295,88 +432,108 @@ public func kstorekit2_purchase_start(
     .flatMap { UUID(uuidString: $0) }
 
   Task { @MainActor in
-    if !AppStore.canMakePayments {
-      callPurchaseCallback(
-        callbackContext,
-        status: .failed,
-        errorCode: "payments_disabled",
-        errorMessage: "In-app purchases are disabled on this device."
-      )
-      return
-    }
+    await executePurchase(
+      callbackContext: callbackContext,
+      productId: productId,
+      appAccountToken: appAccountToken
+    )
+  }
+}
 
-    do {
-      let products = try await Product.products(for: [productId])
-      guard let product = products.first else {
-        callPurchaseCallback(
-          callbackContext,
-          status: .failed,
-          errorCode: "product_not_found",
-          errorMessage: "The requested product was not found."
-        )
-        return
-      }
+@_cdecl("kstorekit2_purchase_promotional_start")
+public func kstorekit2_purchase_promotional_start(
+  _ productIdPtr: UnsafePointer<CChar>?,
+  _ appAccountTokenPtr: UnsafePointer<CChar>?,
+  _ offerIdPtr: UnsafePointer<CChar>?,
+  _ keyIdPtr: UnsafePointer<CChar>?,
+  _ noncePtr: UnsafePointer<CChar>?,
+  _ signaturePtr: UnsafePointer<CChar>?,
+  _ timestamp: Int64,
+  _ callback: @escaping KapuschStoreKit2PurchaseCallback,
+  _ context: UnsafeMutableRawPointer
+) {
+  let callbackContext = PurchaseCallbackContext(callback: callback, context: context)
 
-      var options = Set<Product.PurchaseOption>()
-      if let appAccountToken {
-        options.insert(.appAccountToken(appAccountToken))
-      }
+  guard let productId = sanitizeRequiredCstring(productIdPtr) else {
+    callPurchaseCallback(
+      callbackContext,
+      status: .failed,
+      errorCode: "invalid_product_id",
+      errorMessage: "The product id is empty."
+    )
+    return
+  }
 
-      let result = try await product.purchase(options: options)
+  guard let offerId = sanitizeRequiredCstring(offerIdPtr) else {
+    callPurchaseCallback(
+      callbackContext,
+      status: .failed,
+      errorCode: "invalid_offer_id",
+      errorMessage: "Promotional offer id is required."
+    )
+    return
+  }
 
-      switch result {
-      case .userCancelled:
-        callPurchaseCallback(callbackContext, status: .cancelled)
+  guard let keyId = sanitizeRequiredCstring(keyIdPtr) else {
+    callPurchaseCallback(
+      callbackContext,
+      status: .failed,
+      errorCode: "invalid_key_id",
+      errorMessage: "Promotional offer key id is required."
+    )
+    return
+  }
 
-      case .pending:
-        callPurchaseCallback(callbackContext, status: .pending)
+  guard let nonceRaw = sanitizeRequiredCstring(noncePtr), let nonce = UUID(uuidString: nonceRaw) else {
+    callPurchaseCallback(
+      callbackContext,
+      status: .failed,
+      errorCode: "invalid_nonce",
+      errorMessage: "Promotional offer nonce must be a valid UUID."
+    )
+    return
+  }
 
-      case .success(let verificationResult):
-        switch verificationResult {
-        case .verified(let transaction):
-          let transactionJws = verificationResult.jwsRepresentation
-          let originalId = String(transaction.originalID)
+  guard let signatureRaw = sanitizeRequiredCstring(signaturePtr),
+    let signatureData = Data(base64Encoded: signatureRaw) else {
+    callPurchaseCallback(
+      callbackContext,
+      status: .failed,
+      errorCode: "invalid_signature",
+      errorMessage: "Promotional offer signature must be base64 encoded."
+    )
+    return
+  }
 
-          await transaction.finish()
+  guard timestamp > 0, timestamp <= Int64(Int.max) else {
+    callPurchaseCallback(
+      callbackContext,
+      status: .failed,
+      errorCode: "invalid_timestamp",
+      errorMessage: "Promotional offer timestamp is invalid."
+    )
+    return
+  }
 
-          callPurchaseCallback(
-            callbackContext,
-            status: .success,
-            productId: transaction.productID,
-            originalTransactionId: originalId,
-            signedTransactionInfo: transactionJws
-          )
+  let appAccountToken = appAccountTokenPtr
+    .map { String(cString: $0) }
+    .flatMap { UUID(uuidString: $0) }
 
-        case .unverified(let transaction, let error):
-          let transactionJws = verificationResult.jwsRepresentation
-          callPurchaseCallback(
-            callbackContext,
-            status: .failed,
-            productId: transaction.productID,
-            originalTransactionId: String(transaction.originalID),
-            signedTransactionInfo: transactionJws,
-            errorCode: "unverified_transaction",
-            errorMessage: error.localizedDescription
-          )
-        }
+  let promotionalOffer = PromotionalOfferInput(
+    offerId: offerId,
+    keyId: keyId,
+    nonce: nonce,
+    signature: signatureData,
+    timestamp: Int(timestamp)
+  )
 
-      @unknown default:
-        callPurchaseCallback(
-          callbackContext,
-          status: .failed,
-          errorCode: "unknown_purchase_result",
-          errorMessage: "Unknown purchase result."
-        )
-      }
-    } catch {
-      let nsError = error as NSError
-      callPurchaseCallback(
-        callbackContext,
-        status: .failed,
-        errorCode: "\(nsError.domain):\(nsError.code)",
-        errorMessage: nsError.localizedDescription
-      )
-    }
+  Task { @MainActor in
+    await executePurchase(
+      callbackContext: callbackContext,
+      productId: productId,
+      appAccountToken: appAccountToken,
+      promotionalOffer: promotionalOffer
+    )
   }
 }
 
@@ -392,29 +549,7 @@ public func kstorekit2_restore_start(
   Task { @MainActor in
     do {
       try await AppStore.sync()
-
-      var restoredTransactions: [RestoreTransactionPayload] = []
-
-      for await verificationResult in Transaction.currentEntitlements {
-        switch verificationResult {
-        case .verified(let transaction):
-          if !filterProductIds.isEmpty && !filterProductIds.contains(transaction.productID) {
-            continue
-          }
-
-          restoredTransactions.append(
-            RestoreTransactionPayload(
-              productId: transaction.productID,
-              originalTransactionId: String(transaction.originalID),
-              signedTransactionInfo: verificationResult.jwsRepresentation
-            )
-          )
-
-        case .unverified:
-          continue
-        }
-      }
-
+      let restoredTransactions = await collectCurrentEntitlements(filterProductIds: filterProductIds)
       if restoredTransactions.isEmpty {
         callRestoreCallback(
           callbackContext,
@@ -428,6 +563,37 @@ public func kstorekit2_restore_start(
       let payloadData = try JSONEncoder().encode(restoredTransactions)
       let payloadJson = String(data: payloadData, encoding: .utf8)
 
+      callRestoreCallback(
+        callbackContext,
+        status: .success,
+        payloadJson: payloadJson
+      )
+    } catch {
+      let nsError = error as NSError
+      callRestoreCallback(
+        callbackContext,
+        status: .failed,
+        errorCode: "\(nsError.domain):\(nsError.code)",
+        errorMessage: nsError.localizedDescription
+      )
+    }
+  }
+}
+
+@_cdecl("kstorekit2_current_entitlements_start")
+public func kstorekit2_current_entitlements_start(
+  _ productIdsJsonPtr: UnsafePointer<CChar>?,
+  _ callback: @escaping KapuschStoreKit2RestoreCallback,
+  _ context: UnsafeMutableRawPointer
+) {
+  let callbackContext = RestoreCallbackContext(callback: callback, context: context)
+  let filterProductIds = parseProductIdsJson(productIdsJsonPtr)
+
+  Task { @MainActor in
+    do {
+      let transactions = await collectCurrentEntitlements(filterProductIds: filterProductIds)
+      let payloadData = try JSONEncoder().encode(transactions)
+      let payloadJson = String(data: payloadData, encoding: .utf8)
       callRestoreCallback(
         callbackContext,
         status: .success,
