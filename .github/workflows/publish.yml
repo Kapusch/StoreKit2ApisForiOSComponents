@@ -2,6 +2,11 @@ name: publish
 
 on:
   workflow_dispatch:
+    inputs:
+      manual_version:
+        description: 'Force a specific version for NuGet.org publish (e.g., 1.0.0 or 1.0.0-rc.1). If empty, defaults to auto-generated preview for GitHub Packages.'
+        required: false
+        type: string
   push:
     tags:
       - "v*"
@@ -13,6 +18,10 @@ permissions:
 jobs:
   pack_and_publish:
     runs-on: macos-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,24 +31,69 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [[ "${{ github.ref }}" =~ ^refs/tags/v ]]; then
-            REF="${{ github.ref }}"
+          REF="${{ github.ref }}"
+          EVENT="${{ github.event_name }}"
+          MANUAL_VERSION="${{ github.event.inputs.manual_version }}"
+          CSPROJ="src/Kapusch.StoreKit2ApisForiOSComponents/Kapusch.StoreKit2ApisForiOSComponents.csproj"
+          BASE_VERSION=$(grep -oE '<Version>[^<]+' "$CSPROJ" | head -n 1 | sed 's/<Version>//' || echo "1.0.0")
+
+          if [[ -n "$MANUAL_VERSION" ]]; then
+            VERSION="$MANUAL_VERSION"
+            PUBLISH_TARGET="nuget"
+            echo "Manual version provided ($VERSION). Triggering NuGet.org publish."
+          elif [[ "$REF" =~ ^refs/tags/v ]]; then
             VERSION="${REF#refs/tags/v}"
+            PUBLISH_TARGET="nuget"
           else
-            CSPROJ="src/Kapusch.StoreKit2ApisForiOSComponents/Kapusch.StoreKit2ApisForiOSComponents.csproj"
-            BASE_VERSION=$(grep -oE '<Version>[^<]+' "$CSPROJ" | head -n 1 | sed 's/<Version>//' || echo "0.1.0")
             COMMIT_SHORT=$(git rev-parse --short HEAD)
             RUN_NUMBER="${{ github.run_number }}"
-            VERSION="${BASE_VERSION}-prerelease.${RUN_NUMBER}.${COMMIT_SHORT}"
+            VERSION="${BASE_VERSION}-preview.${RUN_NUMBER}.${COMMIT_SHORT}"
+            PUBLISH_TARGET="github"
           fi
+
+          if [[ "$PUBLISH_TARGET" == "nuget" ]]; then
+            git fetch origin +refs/heads/*:refs/remotes/origin/*
+            TAGGED_SHA="${{ github.sha }}"
+            CONTAINING_BRANCHES=$(git for-each-ref --format='%(refname:short)' refs/remotes/origin --contains "$TAGGED_SHA")
+
+            ON_MASTER="false"
+            ON_RELEASE="false"
+            while IFS= read -r branch; do
+              [[ "$branch" == "origin/master" ]] && ON_MASTER="true"
+              [[ "$branch" == origin/release/* ]] && ON_RELEASE="true"
+            done <<< "$CONTAINING_BRANCHES"
+
+            if [[ "$VERSION" == *-* ]]; then
+              if [[ "$ON_RELEASE" != "true" ]]; then
+                echo "ERROR: Pre-release version $VERSION must be on origin/release/*"
+                exit 1
+              fi
+            else
+              if [[ "$ON_MASTER" != "true" ]]; then
+                echo "ERROR: Stable version $VERSION must be on origin/master"
+                exit 1
+              fi
+            fi
+          fi
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "publish_target=${PUBLISH_TARGET}" >> "$GITHUB_OUTPUT"
+          echo "Package version: ${VERSION}"
+          echo "Publish target: ${PUBLISH_TARGET}"
 
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
 
       - name: Install iOS workload
-        run: dotnet workload install ios
+        run: |
+          dotnet workload install ios
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('global.json', '**/*.csproj') }}
 
       - name: Build iOS wrapper
         run: |
@@ -80,10 +134,30 @@ jobs:
               print(f"  - {p}")
             sys.exit(1)
 
+          if "Info.plist" in names:
+            print("ERROR: wrapper appears flattened (found 'Info.plist' at package root).")
+            sys.exit(1)
+
           print("OK: nupkg layout looks correct.")
           PY
 
-      - name: Push to GitHub Packages
+      - name: Push to NuGet.org
+        if: steps.version.outputs.publish_target == 'nuget'
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Publish to NuGet.org
+        if: steps.version.outputs.publish_target == 'nuget'
+        run: |
+          dotnet nuget push artifacts/nuget/*.nupkg \
+            --api-key "${{ steps.nuget_login.outputs.NUGET_API_KEY }}" \
+            --source "https://api.nuget.org/v3/index.json" \
+            --skip-duplicate
+
+      - name: Publish to GitHub Packages
+        if: steps.version.outputs.publish_target == 'github'
         env:
           NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
